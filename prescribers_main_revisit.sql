@@ -1,9 +1,7 @@
 -- 1. a. Which prescriber had the highest total number of claims (totaled over all drugs)? Report the npi and the total number of claims.
 SELECT npi,
 	   SUM(total_claim_count) AS total_claims
-FROM prescriber
-	 INNER JOIN prescription
-	 USING(npi)
+FROM prescription
 GROUP BY npi
 ORDER BY total_claims DESC
 LIMIT 5;
@@ -19,7 +17,8 @@ FROM prescriber
 	 USING(npi)
 GROUP BY nppes_provider_first_name, 
 	   	 nppes_provider_last_org_name,
-		 specialty_description
+		 specialty_description,
+		 npi
 ORDER BY total_claims DESC
 LIMIT 5;
 -- Bruce Pendley who works in Family Practice
@@ -48,6 +47,56 @@ GROUP BY specialty_description
 ORDER BY total_claims DESC
 LIMIT 5;
 -- Nurse Practitioners with 900,845 (Family Practice is 2nd with just over half that amount)
+-- Tomo pointed out that there are instances when a drug_name has multiple associated generic_names
+SELECT drug_name,
+	   COUNT(generic_name)
+FROM drug
+--WHERE antibiotic_drug_flag = 'Y'
+GROUP BY drug_name
+HAVING COUNT(generic_name) > 1;
+
+SELECT drug_name,
+	   generic_name
+FROM drug
+WHERE drug_name = 'METRONIDAZOLE';
+--Then we looked at whether this messed with the opioids
+SELECT drug_name
+FROM drug
+GROUP BY drug_name
+HAVING COUNT(DISTINCT opioid_drug_flag) = 2;
+-- And for 5 drugs, it does! NO GOOD!
+SELECT *
+FROM drug
+WHERE drug_name ILIKE '%cod%'
+	OR generic_name ILIKE '%cod%'
+ORDER BY generic_name;
+-- All the opioids with multiple generic names, only one is flagged as an opioid
+SELECT drug_name
+FROM drug
+WHERE opioid_drug_flag = 'Y'
+GROUP BY drug_name
+HAVING COUNT(generic_name) > 1;
+
+SELECT *
+FROM prescription
+	 INNER JOIN drug
+	 USING(drug_name)
+WHERE drug_name ILIKE '%INFUMORPH%';
+
+
+SELECT specialty_description, 
+		SUM(total_claim_count) AS total_claims
+FROM prescription 
+	 INNER JOIN prescriber
+	 USING(npi)
+	 INNER JOIN (SELECT DISTINCT drug_name,
+				 		opioid_drug_flag
+				 FROM drug) AS sub
+	 USING(drug_name)
+WHERE opioid_drug_flag = 'Y'
+GROUP BY specialty_description
+ORDER BY total_claims DESC;
+
 
 --     c. **Challenge Question:** Are there any specialties that appear in the prescriber table that have no associated prescriptions in the prescription table?
 SELECT specialty_description
@@ -61,15 +110,15 @@ HAVING SUM(total_claim_count) IS NULL;
 --     d. **Difficult Bonus:** *Do not attempt until you have solved all other problems!* For each specialty, report the percentage of total claims by that specialty which are for opioids. Which specialties have a high percentage of opioids?
 SELECT specialty_description,
 	   SUM(total_claim_count) AS total_claims,
-	   SUM(CASE WHEN opioid_drug_flag = 'Y' THEN total_claim_count END) AS total_opioid_claims,
-	   ROUND(SUM(CASE WHEN opioid_drug_flag = 'Y' THEN total_claim_count END) * 100.0 / SUM(total_claim_count), 2) AS percent_opioid_claims
+	   COALESCE(SUM(CASE WHEN opioid_drug_flag = 'Y' THEN total_claim_count END),0) AS total_opioid_claims,
+	   COALESCE(ROUND(SUM(CASE WHEN opioid_drug_flag = 'Y' THEN total_claim_count END) * 100.0 / SUM(total_claim_count), 2), 0) AS percent_opioid_claims
 FROM prescriber
 	 INNER JOIN prescription
 	 USING(npi)
-	 INNER JOIN drug
+	 INNER JOIN drug--(SELECT DISTINCT drug_name, opioid_drug_flag FROM drug) AS d_drug
 	 USING(drug_name)
 GROUP BY specialty_description
-ORDER BY percent_opioid_claims DESC NULLS LAST;
+ORDER BY percent_opioid_claims DESC;
 -- Case Manager/Care Coordinator (very low total # of claims),Orthopaedic Surgery (low total # of claims), Interventional Pain Managment, Anesthesiology, Pain Management, Hand Surgery, Surgical Oncology are all over 50%
 
 -- 3. a. Which drug (generic_name) had the highest total drug cost?
@@ -77,6 +126,7 @@ SELECT generic_name,
 	   SUM(total_drug_cost)::money AS total_cost
 FROM prescription
 	 INNER JOIN drug
+	 --(SELECT DISTINCT drug_name, generic_name FROM drug) AS d_drug
 	 USING(drug_name)
 GROUP BY generic_name
 ORDER BY total_cost DESC
@@ -88,6 +138,7 @@ SELECT generic_name,
 	   ROUND(SUM(total_drug_cost) * 100 / SUM(total_day_supply), 2)::money AS cost_per_day
 FROM prescription
 	 INNER JOIN drug
+	 --(SELECT DISTINCT drug_name, generic_name FROM drug) AS d_drug
 	 USING(drug_name)
 GROUP BY generic_name
 ORDER BY cost_per_day DESC
@@ -108,6 +159,18 @@ FROM drug
 	 INNER JOIN prescription
 	 USING(drug_name);
 -- Significantly more was spent on opioids $105,080,626.37 vs. $38,435,121.26
+-- addressing the multiple rows for some drug_name values
+SELECT SUM(CASE WHEN opioid_drug_flag = 'Y' THEN total_drug_cost END)::money AS opioid_cost,
+	   SUM(CASE WHEN antibiotic_drug_flag = 'Y' THEN total_drug_cost END)::money AS antibiotic_cost
+FROM (SELECT DISTINCT drug_name,
+				 		opioid_drug_flag,
+	  					antibiotic_drug_flag
+		FROM drug
+	 WHERE opioid_drug_flag = 'Y'
+	 	OR antibiotic_drug_flag = 'Y') AS sub
+	 INNER JOIN prescription
+	 USING(drug_name); 
+-- this drops the total for antibiotics to $34,972,135.84, indicating that there are antibiotics in the list that have multiple generic names for a given drug name, and both are flagged as antibiotics
 
 -- 5. a. How many CBSAs are in Tennessee? **Warning:** The cbsa table contains information for all states, not just Tennessee.
 SELECT COUNT(DISTINCT cbsaname)
@@ -179,21 +242,63 @@ FROM prescription
 WHERE total_claim_count >= 3000;
 
 --     c. Add another column to you answer from the previous part which gives the prescriber first and last name associated with each row.
-SELECT drug_name,
+"SELECT drug_name,
 	   total_claim_count,
 	   opioid_drug_flag,
 	   nppes_provider_first_name, 
-	   nppes_provider_last_org_name
+	   nppes_provider_last_org_name,
+	   specialty_description
 FROM prescription
 	 INNER JOIN drug
 	 USING(drug_name)
 	 INNER JOIN prescriber
 	 USING(npi)
-WHERE total_claim_count >= 3000;
+WHERE total_claim_count >= 3000
+ORDER BY total_claim_count DESC;"
 
 -- 7. The goal of this exercise is to generate a full list of all pain management specialists in Nashville and the number of claims they had for each opioid. **Hint:** The results from all 3 parts will have 637 rows.
 --     a. First, create a list of all npi/drug_name combinations for pain management specialists (specialty_description = 'Pain Managment') in the city of Nashville (nppes_provider_city = 'NASHVILLE'), where the drug is an opioid (opiod_drug_flag = 'Y'). **Warning:** Double-check your query before running it. You will only need to use the prescriber and drug tables since you don't need the claims numbers yet.
+SELECT npi,
+	   drug_name
+FROM prescriber
+	 CROSS JOIN drug --(SELECT DISTINCT drug_name FROM drug WHERE opioid_drug_flag = 'Y') AS d_drug
+WHERE specialty_description = 'Pain Management'
+	AND nppes_provider_city = 'NASHVILLE'
+ORDER BY npi;
 
 --     b. Next, report the number of claims per drug per prescriber. Be sure to include all combinations, whether or not the prescriber had any claims. You should report the npi, the drug name, and the number of claims (total_claim_count).
-    
+WITH cross_j AS	(SELECT npi,
+					   drug_name
+				FROM prescriber
+					 CROSS JOIN drug
+				WHERE specialty_description = 'Pain Management'
+					AND nppes_provider_city = 'NASHVILLE'
+					AND opioid_drug_flag = 'Y'
+				ORDER BY npi)
+SELECT npi,
+	   drug_name,
+	   SUM(total_claim_count) AS total_claims
+FROM cross_j 
+	 LEFT JOIN prescription
+	 USING(npi, drug_name)
+GROUP BY npi, drug_name;
+
 --     c. Finally, if you have not done so already, fill in any missing values for total_claim_count with 0. Hint - Google the COALESCE function.
+WITH cross_j AS	(SELECT npi,
+					   drug_name
+				FROM prescriber
+					 CROSS JOIN drug
+				WHERE specialty_description = 'Pain Management'
+					AND nppes_provider_city = 'NASHVILLE'
+					AND opioid_drug_flag = 'Y'
+				ORDER BY npi)
+SELECT npi,
+	   drug_name,
+	   COALESCE(SUM(total_claim_count), 0) AS total_claims
+FROM cross_j 
+	 LEFT JOIN prescription
+	 USING(npi, drug_name)
+GROUP BY npi, drug_name
+ORDER BY total_claims DESC;
+
+
