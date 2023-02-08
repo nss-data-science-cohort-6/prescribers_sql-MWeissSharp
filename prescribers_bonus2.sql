@@ -176,5 +176,5 @@ FROM prescription
 WHERE opioid_cat IS NOT NULL
 	AND nppes_provider_city IN (''NASHVILLE'', ''MEMPHIS'', ''KNOXVILLE'', ''CHATTANOOGA'')
 GROUP BY city, opioid_cat
-ORDER BY 1,2')
+ORDER BY 1,1') --Not exactly sure what these order by values "mean", results seem the same with 1,2 but 1,3 orders by ascending numerical value left to right
 AS ct(city text, codeine numeric, fentanyl numeric, hydrocodone numeric, morphine numeric, oxycodone numeric, oxymorphone numeric);
